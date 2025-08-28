@@ -1,6 +1,8 @@
-import streamlit as st
-import json
 import os
+import streamlit as st
+port = int(os.environ.get("PORT", 8501))
+
+import json
 import faiss
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
@@ -260,3 +262,10 @@ with right:
                     st.write(reply)
     else:
         st.info("Upload a leaf image to get a diagnosis.")
+
+
+if __name__ == "__main__":
+    st.run("app.py", server_port=port, server_address="0.0.0.0")
+
+
+
