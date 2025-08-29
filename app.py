@@ -196,7 +196,9 @@ def health_check():
     })
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))  # ✅ fallback to 5000, not 10000
-    app.run(host='0.0.0.0', port=port, debug=False)
+    port = int(os.environ.get('PORT', 5000))
+    print(f"Flask running on port {port} 🚀")  # helps Render log
+    app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
+
 
 
