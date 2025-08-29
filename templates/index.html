@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AgriBot 🌾 - Farm Assistant</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            display: flex;
+            gap: 20px;
+        }
+        .chat-container, .disease-container {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        .chat-container {
+            flex: 3;
+        }
+        .disease-container {
+            flex: 2;
+        }
+        .main-title {
+            font-size: 2rem;
+            color: #2e7d32;
+            margin-bottom: 10px;
+        }
+        .subtitle {
+            color: #555;
+            margin-bottom: 20px;
+        }
+        .messages {
+            height: 400px;
+            overflow-y: auto;
+            border: 1px solid #ddd;
+            padding: 10px;
+            margin-bottom: 10px;
+            border-radius: 5px;
+        }
+        .message {
+            margin-bottom: 10px;
+            padding: 8px;
+            border-radius: 5px;
+        }
+        .user-message {
+            background-color: #e3f2fd;
+            text-align: right;
+        }
+        .assistant-message {
+            background-color: #f1f8e9;
+        }
+        input, button {
+            padding: 10px;
+            margin: 5px 0;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+        button {
+            background-color: #2e7d32;
+            color: white;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #1b5e20;
+        }
+        #disease-result {
+            margin-top: 10px;
+        }
+        #uploaded-image {
+            max-width: 100%;
+            margin-top: 10px;
+            border-radius: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="chat-container">
+            <h1 class="main-title">🌾 AgriBot — Farm Assistant</h1>
+            <p class="subtitle">Chat about crops, soil, irrigation & pests • <b>Image disease detector</b></p>
+            
+            <div class="messages" id="messages">
+                <div class="message assistant-message">
+                    Hi! Ask me about crop care, soil, irrigation, pests, or fertilizers.
+                </div>
+            </div>
+            
+            <div>
+                <input type="text" id="message-input" placeholder="Type your question..." style="width: 70%;">
+                <button onclick="sendMessage()">Send</button>
+            </div>
+        </div>
+        
+        <div class="disease-container">
+            <h2>🧪 Plant Disease Detector</h2>
+            <input type="file" id="disease-file" accept="image/jpeg,image/png,image/jpg">
+            <button onclick="detectDisease()">Detect Disease</button>
+            
+            <div id="disease-result"></div>
+            <img id="uploaded-image" style="display: none;">
+        </div>
+    </div>
+
+    <script>
+        let chatHistory = [];
+        
+        function addMessage(text, isUser = false) {
+            const messages = document.getElementById('messages');
+            const messageDiv = document.createElement('div');
+            messageDiv.className = isUser ? 'message user-message' : 'message assistant-message';
+            messageDiv.textContent = text;
+            messages.appendChild(messageDiv);
+            messages.scrollTop = messages.scrollHeight;
+        }
+        
+        function sendMessage() {
+            const input = document.getElementById('message-input');
+            const message = input.value.trim();
+            
+            if (!message) return;
+            
+            addMessage(message, true);
+            input.value = '';
+            
+            fetch('/chat', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ message: message })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    addMessage('Error: ' + data.error);
+                } else {
+                    addMessage(data.response);
+                    chatHistory = data.history;
+                }
+            })
+            .catch(error => {
+                addMessage('Error sending message: ' + error);
+            });
+        }
+        
+        function detectDisease() {
+            const fileInput = document.getElementById('disease-file');
+            const file = fileInput.files[0];
+            
+            if (!file) {
+                alert('Please select an image file');
+                return;
+            }
+            
+            const formData = new FormData();
+            formData.append('file', file);
+            
+            fetch('/detect_disease', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.json())
+            .then(data => {
+                const resultDiv = document.getElementById('disease-result');
+                const imageDiv = document.getElementById('uploaded-image');
+                
+                if (data.error) {
+                    resultDiv.innerHTML = `<div style="color: red;">Error: ${data.error}</div>`;
+                    imageDiv.style.display = 'none';
+                } else {
+                    resultDiv.innerHTML = `
+                        <div style="color: green;"><strong>Disease:</strong> ${data.disease}</div>
+                        <div><strong>Confidence:</strong> ${data.confidence.toFixed(2)}%</div>
+                    `;
+                    imageDiv.src = data.image;
+                    imageDiv.style.display = 'block';
+                    
+                    // Auto-ask about the detected disease
+                    setTimeout(() => {
+                        document.getElementById('message-input').value = 
+                            `I have detected ${data.disease} disease in my plant. What should I do?`;
+                        sendMessage();
+                    }, 1000);
+                }
+            })
+            .catch(error => {
+                document.getElementById('disease-result').innerHTML = 
+                    `<div style="color: red;">Error: ${error}</div>`;
+            });
+        }
+        
+        // Allow pressing Enter to send message
+        document.getElementById('message-input').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                sendMessage();
+            }
+        });
+    </script>
+</body>
+</html>
