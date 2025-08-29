@@ -11,11 +11,26 @@ from langchain_community.docstore.in_memory import InMemoryDocstore
 from sentence_transformers import SentenceTransformer
 from langchain_groq import ChatGroq
 from langchain.chains import ConversationalRetrievalChain
+import numpy as np
+from PIL import Image
+import tensorflow as tf
+import json
 
+# Get the directory of the current script
+current_dir = os.path.dirname(os.path.abspath(__file__))
 
-st.set_page_config(page_title="AgriBot 🌾", layout="wide")
+# Set page config first
+st.set_page_config(
+    page_title="AgriBot 🌾", 
+    layout="wide",
+    menu_items={
+        'Get Help': 'https://github.com/119-sam/Agri_bot',
+        'Report a bug': "https://github.com/119-sam/Agri_bot/issues",
+        'About': "# AgriBot - Your AI Farming Assistant"
+    }
+)
 
-
+# Custom CSS
 st.markdown(
     """
     <style>
@@ -58,60 +73,76 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-
+# Get API key
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
-
-
 def load_faiss_vectorstore(embedding_model):
-    index_path = "index.faiss"
-    metadata_path = "metadata.json"
-
+    index_path = os.path.join(current_dir, "index.faiss")
+    metadata_path = os.path.join(current_dir, "metadata.json")
     
+    # Check if files exist
+    if not os.path.exists(index_path) or not os.path.exists(metadata_path):
+        st.error("FAISS index files not found. Please make sure index.faiss and metadata.json are in the root directory.")
+        return None
     
-    index = faiss.read_index(index_path)
+    try:
+        index = faiss.read_index(index_path)
+        
+        with open(metadata_path, "r") as f:
+            metadata = json.load(f)
 
+        docstore = {k: Document(**v) for k, v in metadata["docstore"].items()}
+
+        vectorstore = FAISS(
+            embedding_function=embedding_model,
+            index=index,
+            docstore=docstore,
+            index_to_docstore_id=metadata["index_to_docstore_id"]
+        )
+        return vectorstore
+    except Exception as e:
+        st.error(f"Error loading FAISS vectorstore: {e}")
+        return None
+
+# Initialize components with error handling
+try:
+    embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    vectordb = load_faiss_vectorstore(embedding_model)
     
-    with open(metadata_path, "r") as f:
-        metadata = json.load(f)
-
-    
-    docstore = {k: Document(**v) for k, v in metadata["docstore"].items()}
-
-    
-    vectorstore = FAISS(
-        embedding_function=embedding_model,
-        index=index,
-        docstore=docstore,
-        index_to_docstore_id=metadata["index_to_docstore_id"]
-    )
-    return vectorstore
-
-
-
-embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-
-vectordb = load_faiss_vectorstore(embedding_model)
-
-
-retriever = vectordb.as_retriever(search_kwargs={"k": 3})
-
-
-
-
-llm = ChatGroq(
-    groq_api_key=GROQ_API_KEY,
-    model="openai/gpt-oss-20b"   
-)
-
-
-qa_chain = ConversationalRetrievalChain.from_llm(
-    llm=llm,
-    retriever=retriever,
-    return_source_documents=True
-)
+    if vectordb:
+        retriever = vectordb.as_retriever(search_kwargs={"k": 3})
+    else:
+        retriever = None
+        st.warning("Running without document retrieval. Some features may be limited.")
+        
+    if GROQ_API_KEY:
+        llm = ChatGroq(
+            groq_api_key=GROQ_API_KEY,
+            model_name="openai/gpt-oss-20b",  # Updated to a more commonly available model
+            temperature=0.1
+        )
+    else:
+        llm = None
+        st.error("GROQ_API_KEY not found. Please set the environment variable.")
+        
+    if vectordb and llm:
+        qa_chain = ConversationalRetrievalChain.from_llm(
+            llm=llm,
+            retriever=retriever,
+            return_source_documents=True,
+            verbose=False
+        )
+    else:
+        qa_chain = None
+        
+except Exception as e:
+    st.error(f"Error initializing components: {e}")
+    qa_chain = None
+    llm = None
 
 def call_llm_direct(llm, user_msg, chat_history=None):
+    if not llm:
+        return "LLM not available. Please check your API key."
     
     system_prompt = (
         "You are an agronomy assistant. Be concise and helpful about crops, soil, irrigation, pests, and fertilizers."
@@ -129,76 +160,62 @@ def call_llm_direct(llm, user_msg, chat_history=None):
     prompt += f"User: {user_msg}\nAssistant:"
 
     try:
-       resp = llm.invoke(prompt)
-       if hasattr(resp, "content"):
-         return resp.content
-       return str(resp)
+        resp = llm.invoke(prompt)
+        if hasattr(resp, "content"):
+            return resp.content
+        return str(resp)
     except Exception as e:
-      st.error(f"LLM error: {e}")
-      return "Sorry, I'm currently unable to answer your question."
+        st.error(f"LLM error: {e}")
+        return "Sorry, I'm currently unable to answer your question."
 
+# Initialize session state
+if "messages" not in st.session_state:
+    st.session_state.messages = [
+        {"role": "assistant", "content": "Hi! Ask me about crop care, soil, irrigation, pests, or fertilizers."}
+    ]
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+if "disease_sent" not in st.session_state:
+    st.session_state.disease_sent = None
 
-
-
-
+# Layout
 left, right = st.columns([3, 2], gap="large")
 
 with left:
     st.subheader("💬 Chatbot")  
     
-    if "messages" not in st.session_state:
-        st.session_state.messages = [
-            {"role": "assistant", "content": "Hi! Ask me about crop care, soil, irrigation, pests, or fertilizers."}
-        ]
-    if "chat_history" not in st.session_state:
-        st.session_state.chat_history = []
-
-    
     chat_container = st.container()
-
-    
-    user_msg = st.chat_input("Type your question...")
-
     
     with chat_container:
         for m in st.session_state.messages:
             with st.chat_message(m["role"]):
                 st.write(m["content"])
 
+    user_msg = st.chat_input("Type your question...")
     
     if user_msg:
-        
         st.session_state.messages.append({"role": "user", "content": user_msg})
         with chat_container.chat_message("user"):
             st.write(user_msg)
 
-        
-            try:
-                result = qa_chain({"question": user_msg, "chat_history": st.session_state.chat_history})
-                reply = result["answer"]
-            except Exception as e:
-                #st.warning(f"Retrieval error (ignored): {e}")
-                # Fallback: directly call LLM without retrieval
+        with st.spinner("Thinking..."):
+            if qa_chain:
+                try:
+                    result = qa_chain({"question": user_msg, "chat_history": st.session_state.chat_history})
+                    reply = result["answer"]
+                except Exception as e:
+                    st.warning(f"Retrieval error: {e}")
+                    reply = call_llm_direct(llm, user_msg, chat_history=st.session_state.chat_history)
+            else:
                 reply = call_llm_direct(llm, user_msg, chat_history=st.session_state.chat_history)
-
             
             st.session_state.chat_history.append((user_msg, reply))
 
-        
         st.session_state.messages.append({"role": "assistant", "content": reply})
         with chat_container.chat_message("assistant"):
             st.write(reply)
 
-
-
-import numpy as np
-from PIL import Image
-import tensorflow as tf
-import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
-import json
-
-
+# Disease detection functions
 def preprocess_image(img_file):
     img = Image.open(img_file).convert("RGB")
     img = img.resize((128, 128))
@@ -206,66 +223,83 @@ def preprocess_image(img_file):
     img_array = np.expand_dims(img_array, axis=0)  
     return img_array
 
-
 @st.cache_resource
 def load_cnn_model_and_labels():
-    model = tf.keras.models.load_model("Plant_Disease_CNN_model.h5")
-    with open("class_indices.json", "r") as f:
-        class_indices = json.load(f)
-    
-    labels = {v: k for k, v in class_indices.items()}
-    return model, labels
+    try:
+        model_path = os.path.join(current_dir, "Plant_Disease_CNN_model.h5")
+        class_indices_path = os.path.join(current_dir, "class_indices.json")
+        
+        # Check if files exist
+        if not os.path.exists(model_path) or not os.path.exists(class_indices_path):
+            st.error("Model files not found. Please make sure Plant_Disease_CNN_model.h5 and class_indices.json are in the root directory.")
+            return None, None
+            
+        model = tf.keras.models.load_model(model_path)
+        with open(class_indices_path, "r") as f:
+            class_indices = json.load(f)
+        
+        labels = {v: k for k, v in class_indices.items()}
+        return model, labels
+    except Exception as e:
+        st.error(f"Error loading disease detection model: {e}")
+        return None, None
 
 model, labels = load_cnn_model_and_labels()
 
 with right:
-    
     st.markdown(
-    """
-    <div style="margin-top:-30px;">
-        <h3 style='color:#c62828;'>🧪 Plant Disease Detector</h3>
-    </div>
-    """,
-    unsafe_allow_html=True
-)
+        """
+        <div style="margin-top:-30px;">
+            <h3 style='color:#c62828;'>🧪 Plant Disease Detector</h3>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
     uploaded_file = st.file_uploader("Upload a leaf photo", type=["jpg", "jpeg", "png"])
 
     if uploaded_file:
-        img_array = preprocess_image(uploaded_file)
-        prediction = model.predict(img_array)
-        class_idx = np.argmax(prediction)
-        class_label = labels[class_idx]
-        confidence = float(np.max(prediction)) * 100
+        if model is None:
+            st.error("Disease detection model not available.")
+        else:
+            img_array = preprocess_image(uploaded_file)
+            prediction = model.predict(img_array)
+            class_idx = np.argmax(prediction)
+            class_label = labels[class_idx]
+            confidence = float(np.max(prediction)) * 100
 
-        st.image(uploaded_file, caption="Uploaded Leaf", use_column_width=True)
-        st.success(f"**Predicted Disease:** `{class_label}`")
-        st.info(f"**Confidence:** `{confidence:.2f}%`")
+            st.image(uploaded_file, caption="Uploaded Leaf", use_column_width=True)
+            st.success(f"**Predicted Disease:** `{class_label}`")
+            st.info(f"**Confidence:** `{confidence:.2f}%`")
 
-        
-        disease_query = f"I have detected '{class_label}' disease in my plant. What should I do?"
-        if "disease_sent" not in st.session_state or st.session_state.disease_sent != class_label:
-            st.session_state.disease_sent = class_label
-            st.session_state.messages.append({"role": "user", "content": disease_query})
-            with left:
-                with st.chat_message("user"):
-                    st.write(disease_query)
-                with st.spinner("Thinking..."):
-                    try:
-                        result = qa_chain({"question": disease_query, "chat_history": st.session_state.chat_history})
-                        reply = result["answer"]
-                    except Exception as e:
-                        reply = call_llm_direct(llm, disease_query, chat_history=st.session_state.chat_history)
-                    st.session_state.chat_history.append((disease_query, reply))
-                st.session_state.messages.append({"role": "assistant", "content": reply})
-                with st.chat_message("assistant"):
-                    st.write(reply)
+            # Auto-generate question about the detected disease
+            disease_query = f"I have detected '{class_label}' disease in my plant. What should I do?"
+            if st.session_state.disease_sent != class_label:
+                st.session_state.disease_sent = class_label
+                
+                # Add to chat
+                st.session_state.messages.append({"role": "user", "content": disease_query})
+                with left:
+                    with st.chat_message("user"):
+                        st.write(disease_query)
+                    
+                    with st.spinner("Thinking about treatment..."):
+                        if qa_chain:
+                            try:
+                                result = qa_chain({"question": disease_query, "chat_history": st.session_state.chat_history})
+                                reply = result["answer"]
+                            except Exception as e:
+                                reply = call_llm_direct(llm, disease_query, chat_history=st.session_state.chat_history)
+                        else:
+                            reply = call_llm_direct(llm, disease_query, chat_history=st.session_state.chat_history)
+                        
+                        st.session_state.chat_history.append((disease_query, reply))
+                    
+                    st.session_state.messages.append({"role": "assistant", "content": reply})
+                    with st.chat_message("assistant"):
+                        st.write(reply)
     else:
         st.info("Upload a leaf image to get a diagnosis.")
-
-
-if __name__ == "__main__":
-    st.run("app.py", server_port=port, server_address="0.0.0.0")
 
 
 
