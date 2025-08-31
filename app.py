@@ -1,97 +1,76 @@
-import os
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-import sys
+import streamlit as st
 import json
+import os
 import faiss
-import numpy as np
-from PIL import Image
-import tensorflow as tf
-from flask import Flask, render_template, request, jsonify
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain.docstore.document import Document
+from langchain_community.docstore.in_memory import InMemoryDocstore
+from sentence_transformers import SentenceTransformer
 from langchain_groq import ChatGroq
 from langchain.chains import ConversationalRetrievalChain
-import io
-import base64
 
-app = Flask(__name__)
 
-# Globals (CNN will be lazy loaded)
-qa_chain, llm, model, labels, embedding_model = None, None, None, None, None
+st.set_page_config(page_title="FarmBot 🌾", layout="wide")
 
-# Initialize FAISS + LLM (lightweight stuff only)
-def initialize_components():
-    global qa_chain, llm, embedding_model
+st.title("🌾 FarmBot — Farm Assistant")
+st.caption("Chat about crops, soil, irrigation & pests • (Image disease detector)")
 
-    GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
 
-    # Initialize embedding model
-    embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
 
-    # Load FAISS vectorstore
-    try:
-        index = faiss.read_index("index.faiss")
-        with open("metadata.json", "r") as f:
-            metadata = json.load(f)
-        docstore = {k: Document(**v) for k, v in metadata["docstore"].items()}
-        vectordb = FAISS(
-            embedding_function=embedding_model,
-            index=index,
-            docstore=docstore,
-            index_to_docstore_id=metadata["index_to_docstore_id"]
-        )
-        retriever = vectordb.as_retriever(search_kwargs={"k": 3})
-        print("FAISS vectorstore loaded successfully")
-    except Exception as e:
-        print(f"Error loading FAISS: {e}")
-        retriever = None
+def load_faiss_vectorstore(embedding_model):
+    index_path = "index.faiss"
+    metadata_path = "metadata.json"
 
-    # Initialize LLM
-    if GROQ_API_KEY:
-        try:
-            llm = ChatGroq(
-                groq_api_key=GROQ_API_KEY,
-                model_name="mixtral-8x7b-32768",
-                temperature=0.1
-            )
-            print("LLM initialized successfully")
-        except Exception as e:
-            print(f"Error initializing LLM: {e}")
-            llm = None
-    else:
-        llm = None
-        print("GROQ_API_KEY not set")
+    
+    index = faiss.read_index(index_path)
 
-    # Create QA chain
-    if retriever and llm:
-        try:
-            qa_chain = ConversationalRetrievalChain.from_llm(
-                llm=llm,
-                retriever=retriever,
-                return_source_documents=True
-            )
-            print("QA chain created successfully")
-        except Exception as e:
-            print(f"Error creating QA chain: {e}")
-            qa_chain = None
-    else:
-        qa_chain = None
-        print("QA chain not available due to missing components")
+    
+    with open(metadata_path, "r") as f:
+        metadata = json.load(f)
 
-# Initialize lightweight components at startup
-initialize_components()
+    
+    docstore = {k: Document(**v) for k, v in metadata["docstore"].items()}
 
-# Chat history
-chat_history = []
+    
+    vectorstore = FAISS(
+        embedding_function=embedding_model,
+        index=index,
+        docstore=docstore,
+        index_to_docstore_id=metadata["index_to_docstore_id"]
+    )
+    return vectorstore
 
-# Helper: call LLM directly
-def call_llm_direct(user_msg):
-    if not llm:
-        return "LLM not available. Please check your API key."
 
-    system_prompt = "You are an agronomy assistant. Be concise and helpful about crops, soil, irrigation, pests, and fertilizers."
 
+embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+
+vectordb = load_faiss_vectorstore(embedding_model)
+
+retriever = vectordb.as_retriever(search_kwargs={"k": 3})
+
+
+llm = ChatGroq(
+    groq_api_key=GROQ_API_KEY,
+    model="openai/gpt-oss-20b"
+)
+
+
+qa_chain = ConversationalRetrievalChain.from_llm(
+    llm=llm,
+    retriever=retriever,
+    return_source_documents=True
+)
+
+def call_llm_direct(llm, user_msg, chat_history=None):
+    """
+    Fallback when retrieval fails: use LLM without FAISS.
+    chat_history is optional and can be appended to the prompt.
+    """
+    system_prompt = (
+        "You are an agronomy assistant. Be concise and helpful about crops, soil, irrigation, pests, and fertilizers."
+    )
     history_txt = ""
     if chat_history:
         lines = []
@@ -106,102 +85,146 @@ def call_llm_direct(user_msg):
 
     try:
         resp = llm.invoke(prompt)
-        return resp.content if hasattr(resp, "content") else str(resp)
-    except Exception as e:
-        print(f"LLM error: {e}")
+        if hasattr(resp, "content"):
+            return resp.content
+        return str(resp)
+    except Exception:
         return "Sorry, I'm currently unable to answer your question."
 
-# Helper: preprocess image
+
+
+left, right = st.columns([3, 2], gap="large")
+
+
+with left:
+    st.subheader("💬 Chatbot")
+
+    
+    st.markdown(
+        """
+        <style>
+        /* Chat container scrollable */
+        .chat-container {
+            max-height: 70vh;
+            overflow-y: auto;
+            padding-bottom: 100px; /* space for input bar */
+        }
+        /* Fixed input bar */
+        .fixed-input {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            width: 100%;
+            background: white;
+            padding: 10px 20%;
+            border-top: 1px solid #ddd;
+            z-index: 999;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+
+
+    
+    if "messages" not in st.session_state:
+        st.session_state.messages = [
+            {"role": "assistant", "content": "Hi! Ask me about crop care, soil, irrigation, pests, or fertilizers."}
+        ]
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = []
+
+    
+
+    
+    st.markdown('<div class="chat-container">', unsafe_allow_html=True)
+    for m in st.session_state.messages:
+        with st.chat_message(m["role"]):
+            st.write(m["content"])
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    
+st.markdown('<div class="fixed-input">', unsafe_allow_html=True)
+user_msg = st.chat_input("Type your question...")
+st.markdown('</div>', unsafe_allow_html=True)
+
+    
+if user_msg:
+    st.session_state.messages.append({"role": "user", "content": user_msg})
+    with st.chat_message("user"):
+        st.write(user_msg)
+
+    try:
+        result = qa_chain({"question": user_msg, "chat_history": st.session_state.chat_history})
+        reply = result["answer"]
+    except Exception:
+        reply = call_llm_direct(llm, user_msg, chat_history=st.session_state.chat_history)
+
+    st.session_state.chat_history.append((user_msg, reply))
+    st.session_state.messages.append({"role": "assistant", "content": reply})
+    with st.chat_message("assistant"):
+        st.write(reply)
+
+
+import numpy as np
+from PIL import Image
+import tensorflow as tf
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+import json
+
+
 def preprocess_image(img_file):
-    img = Image.open(io.BytesIO(img_file)).convert("RGB")
+    img = Image.open(img_file).convert("RGB")
     img = img.resize((128, 128))
     img_array = np.array(img) / 255.0
-    img_array = np.expand_dims(img_array, axis=0)
+    img_array = np.expand_dims(img_array, axis=0)  
     return img_array
 
-# Routes
-@app.route('/')
-def index():
-    return render_template('index.html')
 
-@app.route('/chat', methods=['POST'])
-def chat():
-    try:
-        user_msg = request.json.get('message', '')
-        if not user_msg:
-            return jsonify({'error': 'No message provided'})
+@st.cache_resource
+def load_cnn_model_and_labels():
+    model = tf.keras.models.load_model("Plant_Disease_CNN_model.h5")
+    with open("class_indices.json", "r") as f:
+        class_indices = json.load(f)
+    
+    labels = {v: k for k, v in class_indices.items()}
+    return model, labels
 
-        if qa_chain:
-            result = qa_chain({"question": user_msg, "chat_history": chat_history})
-            reply = result["answer"]
-        else:
-            reply = call_llm_direct(user_msg)
+model, labels = load_cnn_model_and_labels()
 
-        chat_history.append((user_msg, reply))
+with right:
+    st.subheader("🧪 Plant Disease Detector")
+    uploaded_file = st.file_uploader("Upload a leaf photo", type=["jpg", "jpeg", "png"])
 
-        return jsonify({
-            'response': reply,
-            'history': chat_history[-10:]
-        })
-    except Exception as e:
-        print(f"Chat error: {e}")
-        return jsonify({'error': str(e)})
-
-@app.route('/detect_disease', methods=['POST'])
-def detect_disease():
-    global model, labels
-    try:
-        if 'file' not in request.files:
-            return jsonify({'error': 'No file uploaded'})
-
-        file = request.files['file']
-        if file.filename == '':
-            return jsonify({'error': 'No file selected'})
-
-        # Lazy-load CNN model
-        if model is None or labels is None:
-            model = tf.keras.models.load_model("Plant_Disease_CNN_model.h5")
-            with open("class_indices.json", "r") as f:
-                class_indices = json.load(f)
-            labels = {v: k for k, v in class_indices.items()}
-            print("CNN model loaded on demand ✅")
-
-        img_data = file.read()
-        img_array = preprocess_image(img_data)
+    if uploaded_file:
+        img_array = preprocess_image(uploaded_file)
         prediction = model.predict(img_array)
         class_idx = np.argmax(prediction)
         class_label = labels[class_idx]
         confidence = float(np.max(prediction)) * 100
 
-        img_base64 = base64.b64encode(img_data).decode('utf-8')
+        st.image(uploaded_file, caption="Uploaded Leaf", use_column_width=True)
+        st.success(f"*Predicted Disease:* {class_label}")
+        st.info(f"*Confidence:* {confidence:.2f}%")
 
-        return jsonify({
-            'disease': class_label,
-            'confidence': confidence,
-            'image': f"data:image/jpeg;base64,{img_base64}"
-        })
-    except Exception as e:
-        print(f"Disease detection error: {e}")
-        return jsonify({'error': str(e)})
-
-@app.route('/get_history', methods=['GET'])
-def get_history():
-    return jsonify({'history': chat_history[-10:]})
-
-@app.route('/health', methods=['GET'])
-def health_check():
-    return jsonify({
-        'status': 'healthy',
-        'llm_available': llm is not None,
-        'model_available': model is not None,
-        'qa_chain_available': qa_chain is not None
-    })
-    
-if __name__ == '__main__':
-    # check command line args first
-    port = int(os.environ.get('PORT', 5000))
-    if len(sys.argv) > 1 and sys.argv[1].startswith("--port="):
-        port = int(sys.argv[1].split("=")[1])
-
-    print(f"Flask running on port {port} 🚀")
-    app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
+        
+        disease_query = f"I have detected '{class_label}' disease in my plant. What should I do?"
+        if "disease_sent" not in st.session_state or st.session_state.disease_sent != class_label:
+            st.session_state.disease_sent = class_label
+            st.session_state.messages.append({"role": "user", "content": disease_query})
+            with left:
+                with st.chat_message("user"):
+                    st.write(disease_query)
+                with st.spinner("Thinking..."):
+                    try:
+                        result = qa_chain({"question": disease_query, "chat_history": st.session_state.chat_history})
+                        reply = result["answer"]
+                    except Exception as e:
+                        reply = call_llm_direct(llm, disease_query, chat_history=st.session_state.chat_history)
+                    st.session_state.chat_history.append((disease_query, reply))
+                st.session_state.messages.append({"role": "assistant", "content": reply})
+                with st.chat_message("assistant"):
+                    st.write(reply)
+    else:
+        st.info("Upload a leaf image to get a diagnosis.")
